@@ -2,7 +2,7 @@
 # This CMakeLists.txt should be included by the parent project
 
 # Find Qt Test component and other dependencies
-find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Core Gui Network Widgets Svg Test REQUIRED)
+find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Core Gui Network Widgets Svg Concurrent Test REQUIRED)
 
 # Get the same source files as the main project
 set(TEST_SOURCES
@@ -59,7 +59,8 @@ target_link_libraries(actionmanagertests PRIVATE
     Qt${QT_VERSION_MAJOR}::Gui 
     Qt${QT_VERSION_MAJOR}::Network 
     Qt${QT_VERSION_MAJOR}::Widgets 
-    Qt${QT_VERSION_MAJOR}::Svg 
+    Qt${QT_VERSION_MAJOR}::Svg
+    Qt${QT_VERSION_MAJOR}::Concurrent
     Qt${QT_VERSION_MAJOR}::Test
 )
 

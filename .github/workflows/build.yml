@@ -14,13 +14,16 @@ on:
         description: 'Notarize with Apple?'
         required: false
         default: false
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
       matrix:
         include:
+          # Use distribution Qt on Linux so deb dependencies can be detected.
           - runner: 'ubuntu-22.04'
-            qtVersion: '5.15.2'
           - runner: 'macos-14'
             qtVersion: '6.8.3'
             qtModules: 'qtimageformats'
@@ -61,7 +64,21 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Install Linux build and packaging dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake ninja-build pkg-config \
+            qtbase5-dev qttools5-dev qttools5-dev-tools \
+            libqt5svg5-dev libqt5x11extras5-dev qt5-image-formats-plugins \
+            libx11-dev libgl1-mesa-dev libxcb-xinerama0 \
+            dpkg-dev fakeroot file desktop-file-utils \
+            appstream curl patchelf squashfs-tools
+
       - name: Install Qt
+        if: runner.os != 'Linux'
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ matrix.qtVersion }}
@@ -69,11 +86,90 @@ jobs:
           cache: true
           modules: ${{ matrix.qtModules }}
 
+      - name: Build qView on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          BUILD_LABEL: ${{ env.buildNumString }}
+        run: |
+          cmake_args=(
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_INSTALL_PREFIX=/usr
+            -DCMAKE_INSTALL_LIBDIR=lib
+            -DCMAKE_DISABLE_FIND_PACKAGE_Qt6=ON
+            "-DCPACK_DEBIAN_PACKAGE_RELEASE=1+ci${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          )
+          if [ -n "$BUILD_LABEL" ]; then
+            cmake_args+=("-DNIGHTLY=$BUILD_LABEL")
+          fi
+          cmake -S . -B build -G Ninja "${cmake_args[@]}"
+          cmake --build build --parallel 2
+
       - name: Build qView
+        if: runner.os != 'Linux'
         shell: pwsh
         run: dist/scripts/build.ps1 -CI
 
+      - name: Package Linux AppImage and deb
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          QMAKE: /usr/bin/qmake
+          EXTRA_QT_MODULES: svg
+          EXTRA_PLATFORM_PLUGINS: libqoffscreen.so
+          BUILD_LABEL: ${{ env.buildNumString }}
+          NIGHTLY_SUFFIX: ${{ env.nightlyString }}
+        run: |
+          mkdir -p bin build/packaging-tools
+          cpack --config build/CPackConfig.cmake -G DEB -B "$PWD/build/deb"
+          mv build/deb/*.deb bin/
+
+          curl --fail --location --retry 3 \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+            --output build/packaging-tools/linuxdeploy-x86_64.AppImage
+          curl --fail --location --retry 3 \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage \
+            --output build/packaging-tools/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x build/packaging-tools/*.AppImage
+
+          DESTDIR="$PWD/build/AppDir" cmake --install build
+          # Provide the PNG expected by appimagetool, even when an SVG is installed.
+          cp build/AppDir/usr/share/icons/hicolor/256x256/apps/com.interversehq.qView.png \
+            build/AppDir/com.interversehq.qView.png
+          ln -sfn com.interversehq.qView.png build/AppDir/.DirIcon
+          app_version=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)
+          test -n "$app_version"
+          export LINUXDEPLOY_OUTPUT_VERSION="$app_version"
+          export LDAI_OUTPUT="$PWD/bin/qView${NIGHTLY_SUFFIX}-${app_version}${BUILD_LABEL:+-$BUILD_LABEL}-x86_64.AppImage"
+          ./build/packaging-tools/linuxdeploy-x86_64.AppImage \
+            --appdir build/AppDir \
+            --executable build/AppDir/usr/bin/qview \
+            --desktop-file build/AppDir/usr/share/applications/com.interversehq.qView.desktop \
+            --icon-file build/AppDir/usr/share/icons/hicolor/256x256/apps/com.interversehq.qView.png \
+            --plugin qt \
+            --output appimage
+          test -s "$LDAI_OUTPUT"
+          chmod +x "$LDAI_OUTPUT"
+          mkdir -p build/appimage-check
+          (
+            cd build/appimage-check
+            "$LDAI_OUTPUT" --appimage-extract >/dev/null
+            test -s squashfs-root/com.interversehq.qView.png
+            test -s squashfs-root/.DirIcon
+            test -n "$(find squashfs-root -name libqoffscreen.so -print -quit)"
+            mkdir -p runtime
+            chmod 700 runtime
+            QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$PWD/runtime" \
+              ./squashfs-root/AppRun --version
+          )
+          (
+            cd bin
+            sha256sum ./*.AppImage ./*.deb > SHA256SUMS
+          )
+
       - name: Deploy qView
+        if: runner.os != 'Linux'
         env:
           APPLE_NOTARIZE_REQUESTED: ${{ inputs.appleNotarize }}
           APPLE_DEVID_APP_CERT_DATA: ${{ secrets.APPLE_DEVID_APP_CERT_DATA }}
@@ -90,8 +186,6 @@ jobs:
           } elseif ($IsMacOS) {
             & dist/scripts/macinstallcert.ps1
             bash dist/scripts/macdeploy.sh ${{ env.buildNumString }}
-          } else {
-            bash dist/scripts/linuxdeployqt.sh ${{ env.buildNumString }}
           }
 
       - name: 'Upload Artifact'
@@ -102,6 +196,9 @@ jobs:
 
   nightly-release:
     needs: build
+    permissions:
+      contents: write
+      actions: read
     if: github.ref_name == 'main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

@@ -32,6 +32,9 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QTemporaryFile>
+#include <QToolBar>
+#include <QVariantAnimation>
+#include <QGraphicsOpacityEffect>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow)
 {
@@ -128,6 +131,71 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
         ActionManager::actionTriggered(triggeredAction, this);
     });
 
+    // Overlay the controls so hiding them never changes the image viewport.
+    bottomToolBar = new QToolBar(centralWidget());
+    bottomToolBar->setObjectName("bottomToolBar");
+    bottomToolBar->setMovable(false);
+    bottomToolBar->setFloatable(false);
+    bottomToolBar->setIconSize(QSize(24, 24));
+    bottomToolBar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    bottomToolBar->setStyleSheet(QStringLiteral(
+            "QToolBar#bottomToolBar { background: rgba(18, 20, 24, 145);"
+            " border: 1px solid rgba(255, 255, 255, 24); border-radius: 12px;"
+            " padding: 7px; spacing: 4px; }"
+            "QToolBar#bottomToolBar QToolButton { background: transparent; border: "
+            "none;"
+            " border-radius: 9px; width: 36px; height: 36px; padding: 0; }"
+            "QToolBar#bottomToolBar QToolButton:hover { background: rgba(255, 255, "
+            "255, 25); }"
+            "QToolBar#bottomToolBar QToolButton:pressed { background: rgba(255, 255, "
+            "255, 45); }"));
+    bottomToolBar->hide();
+
+    const QStringList toolbarActions = { "previousfile", "zoomin", "rotateright", "zoomout",
+                                         "nextfile" };
+    for (const QString &key : toolbarActions) {
+        auto *action = actionManager.addCloneOfAction(bottomToolBar, key);
+        action->setIcon(QIcon(QStringLiteral(":/toolbar/%1.svg").arg(key)));
+        // The virtual menu already handles this window's keyboard shortcuts.
+        action->setShortcutContext(Qt::WidgetShortcut);
+        bottomToolBar->widgetForAction(action)->installEventFilter(this);
+    }
+    connect(bottomToolBar, &QToolBar::actionTriggered, this, [this](QAction *triggeredAction) {
+        ActionManager::actionTriggered(triggeredAction, this);
+    });
+
+    bottomToolBarOpacity = new QGraphicsOpacityEffect(bottomToolBar);
+    bottomToolBarOpacity->setOpacity(0.0);
+    bottomToolBar->setGraphicsEffect(bottomToolBarOpacity);
+    bottomToolBarAnimation = new QVariantAnimation(this);
+    bottomToolBarAnimation->setDuration(180);
+    bottomToolBarAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(bottomToolBarAnimation, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) {
+                bottomToolBarOpacity->setOpacity(value.toReal());
+                positionBottomToolBar();
+            });
+    connect(bottomToolBarAnimation, &QVariantAnimation::finished, this, [this]() {
+        if (!bottomToolBarTargetVisible)
+            bottomToolBar->hide();
+        // Render SVG icons directly at the display's DPI once the fade completes.
+        bottomToolBarOpacity->setEnabled(false);
+    });
+
+    bottomToolBarHideTimer = new QTimer(this);
+    bottomToolBarHideTimer->setObjectName("bottomToolBarHideTimer");
+    bottomToolBarHideTimer->setSingleShot(true);
+    bottomToolBarHideTimer->setInterval(1000);
+    connect(bottomToolBarHideTimer, &QTimer::timeout, this, [this]() {
+        if (!bottomToolBar->underMouse())
+            hideBottomToolBar();
+    });
+
+    centralWidget()->installEventFilter(this);
+    bottomToolBar->installEventFilter(this);
+    graphicsView->setMouseTracking(true);
+    graphicsView->viewport()->installEventFilter(this);
+
     // Enable actions related to having a window
     disableActions();
 
@@ -175,6 +243,66 @@ bool MainWindow::event(QEvent *event)
     return QMainWindow::event(event);
 }
 
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip
+        && (watched == bottomToolBar || watched->parent() == bottomToolBar))
+        return true;
+
+    if (watched == centralWidget() && event->type() == QEvent::Resize) {
+        positionBottomToolBar();
+    } else if (watched == graphicsView->viewport() && event->type() == QEvent::MouseMove) {
+        const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->pos().y() >= graphicsView->viewport()->height() - 48)
+            showBottomToolBar();
+    } else if (watched == bottomToolBar) {
+        if (event->type() == QEvent::Enter) {
+            showBottomToolBar();
+            bottomToolBarHideTimer->stop();
+        } else if (event->type() == QEvent::Leave)
+            bottomToolBarHideTimer->start();
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::positionBottomToolBar()
+{
+    const QSize toolbarSize = bottomToolBar->sizeHint().boundedTo(centralWidget()->size());
+    bottomToolBar->resize(toolbarSize);
+    bottomToolBar->move((centralWidget()->width() - toolbarSize.width()) / 2,
+                        qMax(0, centralWidget()->height() - toolbarSize.height() - 20)
+                                + qRound((1.0 - bottomToolBarOpacity->opacity()) * 10));
+    bottomToolBar->raise();
+}
+
+void MainWindow::showBottomToolBar()
+{
+    if (!bottomToolBarTargetVisible) {
+        bottomToolBarTargetVisible = true;
+        bottomToolBarAnimation->stop();
+        bottomToolBarOpacity->setEnabled(true);
+        bottomToolBarAnimation->setStartValue(bottomToolBarOpacity->opacity());
+        bottomToolBarAnimation->setEndValue(1.0);
+        positionBottomToolBar();
+        bottomToolBar->show();
+        bottomToolBarAnimation->start();
+    }
+    if (!bottomToolBar->underMouse())
+        bottomToolBarHideTimer->start();
+}
+
+void MainWindow::hideBottomToolBar()
+{
+    if (!bottomToolBarTargetVisible)
+        return;
+    bottomToolBarTargetVisible = false;
+    bottomToolBarAnimation->stop();
+    bottomToolBarOpacity->setEnabled(true);
+    bottomToolBarAnimation->setStartValue(bottomToolBarOpacity->opacity());
+    bottomToolBarAnimation->setEndValue(0.0);
+    bottomToolBarAnimation->start();
+}
+
 void MainWindow::contextMenuEvent(QContextMenuEvent *event)
 {
     QMainWindow::contextMenuEvent(event);
@@ -208,6 +336,7 @@ void MainWindow::showEvent(QShowEvent *event)
     }
 
     QMainWindow::showEvent(event);
+    showBottomToolBar();
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -225,6 +354,8 @@ void MainWindow::closeEvent(QCloseEvent *event)
     qvApp->getActionManager().untrackClonedActions(contextMenu);
     qvApp->getActionManager().untrackClonedActions(menuBar());
     qvApp->getActionManager().untrackClonedActions(virtualMenu);
+    qvApp->getActionManager().untrackClonedActions(
+            ActionManager::getAllNestedActions(bottomToolBar->actions()));
 
     QMainWindow::closeEvent(event);
 }
@@ -347,9 +478,9 @@ void MainWindow::settingsUpdated()
 
 #ifdef COCOA_LOADED
     // titlebaralwaysdark/hidetitlebar
-    QVCocoaFunctions::setVibrancy(
-            settingsManager.getBool(SettingsManager::Setting::HideTitlebar),
-            settingsManager.getBool(SettingsManager::Setting::ForceDarkMode), windowHandle());
+    QVCocoaFunctions::setVibrancy(settingsManager.getBool(SettingsManager::Setting::HideTitlebar),
+                                  settingsManager.getBool(SettingsManager::Setting::ForceDarkMode),
+                                  windowHandle());
     // quitonlastwindow
     qvApp->setQuitOnLastWindowClosed(
             settingsManager.getBool(SettingsManager::Setting::QuitOnLastWindow));

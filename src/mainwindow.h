@@ -11,6 +11,10 @@
 #include <QNetworkAccessManager>
 #include <QStack>
 
+class QToolBar;
+class QVariantAnimation;
+class QGraphicsOpacityEffect;
+
 namespace Ui {
 class MainWindow;
 }
@@ -138,6 +142,8 @@ public slots:
 protected:
     bool event(QEvent *event) override;
 
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
     void contextMenuEvent(QContextMenuEvent *event) override;
 
     void showEvent(QShowEvent *event) override;
@@ -159,11 +165,20 @@ protected slots:
     void shortcutsUpdated();
 
 private:
+    void positionBottomToolBar();
+    void showBottomToolBar();
+    void hideBottomToolBar();
+
     Ui::MainWindow *ui;
     QVGraphicsView *graphicsView;
 
     QMenu *contextMenu;
     QMenu *virtualMenu;
+    QToolBar *bottomToolBar;
+    QTimer *bottomToolBarHideTimer;
+    QVariantAnimation *bottomToolBarAnimation;
+    QGraphicsOpacityEffect *bottomToolBarOpacity;
+    bool bottomToolBarTargetVisible = false;
 
     QTimer *slideshowTimer;
 
